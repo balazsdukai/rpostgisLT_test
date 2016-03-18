@@ -66,14 +66,16 @@ pgAsDate(con, "fires", date = "time") # convert field type to timestamp
 pgIndex(con, "fires", "time", "time_idx", method = "btree")
 pgIndex(con, "fires", "wkb_geometry", "geom_idx", method = "gist")
 
+# retrieve the subset of points form the database
 query <- "SELECT ogc_fid, ST_AsText(wkb_geometry) As geom
 FROM fires
 WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(ST_Point(6400000, 1950000),ST_Point(6500000 ,2050000)),2229) AND
 fires.time >= '1990-01-01' AND fires.time < '2000-01-01'"
 fire_subset <- dbGetQuery(con, query)
+
+# cast the WKT back into a SpatialPointsDataFrame with the correct CRS
 row.names(fire_subset) <- fire_subset$ogc_fid
 p4s = CRS("+init=epsg:2229 +ellps=GRS80")
-
 for (i in seq(nrow(fire_subset))) {
     if (i == 1) {
         spTemp = readWKT(fire_subset$geom[i], fire_subset$ogc_fid[i], p4s)
