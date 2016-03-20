@@ -45,7 +45,7 @@ library("rgeos")
 # create and set up a test database with PostGIS extension
 # shell: createdb -U bdukai test
 drv <- dbDriver("PostgreSQL")
-con <- dbConnect(drv, user="bdukai", password="bdukai", dbname="test")
+con <- dbConnect(drv, user=USER, password=PASSWORD, dbname="test")
 dbSendQuery(con, "create extension postgis")
 
 # load the "fires" data frame into PostgreSQL
