@@ -45,7 +45,7 @@ library("rgeos")
 # create and set up a test database with PostGIS extension
 # shell: createdb -U bdukai test
 drv <- dbDriver("PostgreSQL")
-con <- dbConnect(drv, user=USER, password=PASSWORD, dbname="test")
+con <- dbConnect(drv, user="bdukai", password="bdukai", dbname="test")
 dbSendQuery(con, "create extension postgis")
 
 # load the "fires" data frame into PostgreSQL
@@ -67,10 +67,77 @@ pgIndex(con, "fires", "time", "time_idx", method = "btree")
 pgIndex(con, "fires", "wkb_geometry", "geom_idx", method = "gist")
 
 # retrieve the subset of points form the database
+subsetPoints <- function(lower_left, upper_right, minTime, maxTime, SRID, conn){
+    # ==============================
+    # Subsets a group of points in a PostGIS database by a bounding box and time range.
+    # Outputs the subset as a SpatialPointsDataFrame object.
+    # Input:
+    #     lower_left – Numeric. The (x,y) coordinate tuple of the lower left corner of the bounding box
+    #     upper_right – Numeric. The (x,y) coordinate tuple of the upper right corner of the bounding box
+    #     minTime – POSIX. Beginning of the time range (inclusive), given as e.g. "1990-01-01"
+    #     maxTime – POSIX. End of the time range (exclusive)
+    #     SRID – Character. The SRID identifier of the CRS.
+    #     conn – PostgreSQLConnection.
+    # Output:
+    #     SpatialPointsDataFrame
+    # Requires: sp, rpostgresql, rgeos
+    # Reference: rpostgis (https://github.com/mablab/rpostgis/blob/master/R/pgGetPts.r)
+    # ==============================
+    
+    lowL <- paste0("ST_Point(",lower_left[1],",",lower_left[2],")")
+    uppR <- paste0("ST_Point(",upper_right[1],",",upper_right[2],")")
+    minT <- as.character(format(minTime, "%Y-%m-%d"))
+    maxT <- as.character(format(maxTime, "%Y-%m-%d"))
+
+    # coerce the SQL query
+    query <- paste0("SELECT ogc_fid, ST_AsText(wkb_geometry) As geom FROM fires WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(",lowL,",",uppR,"),",SRID,") AND fires.time >= '",minT,"' AND fires.time < '",maxT,"';")
+    
+    # Alternative SQL query:
+    #     
+    # SELECT ST_AsText(ST_Collect(f.geom))
+    # FROM (
+    #     SELECT ST_AsText(wkb_geometry) As geom
+    #     FROM fires
+    #     WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(ST_Point(6400000, 1950000),
+    #                                                   ST_Point(6500000 ,2050000)),2229) AND
+    #     fires.time >= '1990-01-01' AND fires.time < '2000-01-01') as f;
+    # 
+    # Which retrieves a single MULTIPOINT WKT, however up to now there is no R function 
+    # which is able to parse MULTIPOINT WKT. 
+
+    # retrieve the data from the database
+    res <- dbGetQuery(conn, query)
+    
+    # cast the WKT back into a SpatialPointsDataFrame with the correct CRS
+    row.names(res) <- res$ogc_fid
+    
+    p4s = CRS(paste0("+init=epsg:", SRID))
+    for (i in seq(nrow(res))) {
+        if (i == 1) {
+            spTemp <-  readWKT(res$geom[i], res$ogc_fid[i], p4s)
+        }
+        else {
+            spTemp <-  rbind(
+                spTemp, readWKT(res$geom[i], res$ogc_fid[i], p4s)
+            )
+        }
+    }
+    subs <-  SpatialPointsDataFrame(spTemp, res[-2])
+    
+    dbClearResult(res)
+    dbDisconnect(con)
+    return(subs)
+    
+}
+
+
 query <- "SELECT ogc_fid, ST_AsText(wkb_geometry) As geom
 FROM fires
 WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(ST_Point(6400000, 1950000),ST_Point(6500000 ,2050000)),2229) AND
 fires.time >= '1990-01-01' AND fires.time < '2000-01-01'"
+
+query2 <- "SELECT ST_AsText(ST_Collect(f.geom)) FROM (SELECT ST_AsText(wkb_geometry) As geom FROM fires WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(ST_Point(6400000, 1950000),ST_Point(6500000 ,2050000)),2229) AND fires.time >= '1990-01-01' AND fires.time < '2000-01-01') as f;"
+
 fire_subset <- dbGetQuery(con, query)
 
 # cast the WKT back into a SpatialPointsDataFrame with the correct CRS
@@ -89,4 +156,23 @@ for (i in seq(nrow(fire_subset))) {
 fire_subset = SpatialPointsDataFrame(spTemp, fire_subset[-2])
 points(fire_subset, col = "red")
 
+a <- c(6400000, 1950000)
+b <- c(6500000 ,2050000)
 
+c <- as.POSIXct("1990-01-01")
+d <- as.POSIXct("1999-10-29 02:00:00")
+
+e <- "2229"
+
+x <- subsetPoints(a,b,c,d,e,con)
+
+lowL <- paste0("ST_Point(",a[1],",",a[2],")")
+uppR <- paste0("ST_Point(",b[1],",",b[2],")")
+minT <- as.character(format(c, "%Y-%m-%d"))
+maxT <- as.character(format(d, "%Y-%m-%d"))
+SRID <- e
+
+query <- paste0("SELECT ogc_fid, ST_AsText(wkb_geometry) As geom FROM fires WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(",lowL,",",uppR,"),",SRID,") AND fires.time >= '",minT,"' AND fires.time < '",maxT,"';")
+
+dbClearResult(fire_subset)
+fire_subset <- dbGetQuery(con, query)
