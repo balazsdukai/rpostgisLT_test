@@ -14,22 +14,6 @@ fires$Time <- as.POSIXct(as.Date("1960-01-01")+(fires$Time-1))
 
 coordinates(fires) <- c("X", "Y")
 proj4string(fires) <- CRS("+init=epsg:2229 +ellps=GRS80")
-#plot(fires, pch = 3)
-
-# =========================================
-# Query spatial and temporal extent
-# Test code provided on GitHub
-# https://github.com/rstats-gsoc/gsoc2016/wiki/Managing-and-visualizing-movement-data-with-PostGIS-and-R
-# =========================================
-(subfires <- subset(fires, coordinates(fires)[, 1] >= 6400000 
-                    & coordinates(fires)[, 1] <= 6500000 
-                    & coordinates(fires)[, 2] >= 1950000 
-                    & coordinates(fires)[, 2] <= 2050000 
-                    & fires$Time >= as.POSIXct("1990-01-01") 
-                    & fires$Time < as.POSIXct("2000-01-01")))
-
-rect(6400000, 1950000, 6500000, 2050000, border = "red", lwd = 2)
-points(subfires, col = "red")
 
 # =========================================
 # Code written by Balázs Dukai starts here
@@ -43,31 +27,32 @@ library("rgdal")
 library("rgeos")
 
 # create and set up a test database with PostGIS extension
-# shell: createdb -U bdukai test
+# shell: createdb -U USERNAME test
 drv <- dbDriver("PostgreSQL")
-con <- dbConnect(drv, user="bdukai", password="bdukai", dbname="test")
+con <- dbConnect(drv, user="USERNAME", password="PASSWORD", dbname="test")
 dbSendQuery(con, "create extension postgis")
 
 # load the "fires" data frame into PostgreSQL
 writeOGR(fires, driver = "PostgreSQL", "PG:dbname=test host=localhost", layer = "fires")
 dbListFields(con, "fires")
-query <- "select column_name, data_type from information_schema.columns
-where table_name = 'fires'"
+query <- "SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name = 'fires'"
 res <- dbSendQuery(con, query)
 dbFetch(res)
 dbClearResult(res)
+
 # the field "time" which contain the timestamps is of type "character varying"
 pgAsDate(con, "fires", date = "time") # convert field type to timestamp
 
 # create indexes
 # ogc_fid —> primary key. The UID field. It was already created by the writeOGR function.
 # time —> B-Tree. Because timestamps are 1D and ordered.
-# wkb_geometry —> GiST. Because data is 2D and irregular.
+# wkb_geometry —> GiST. Because data is 2D and irregular. And because PostGIS doesn't support pure R-Trees any more. Thus literally GiST is the only spatial indexing method available in PostGIS at the moment.
 pgIndex(con, "fires", "time", "time_idx", method = "btree")
 pgIndex(con, "fires", "wkb_geometry", "geom_idx", method = "gist")
 
-# retrieve the subset of points form the database
-subsetPoints <- function(lower_left, upper_right, minTime, maxTime, SRID, conn){
+# function to retrieve the subset of points form the database
+subsetPoints <- function(conn, name, geom, lower_left, upper_right, minTime, maxTime){
     # ==============================
     # Subsets a group of points in a PostGIS database by a bounding box and time range.
     # Outputs the subset as a SpatialPointsDataFrame object.
@@ -76,7 +61,8 @@ subsetPoints <- function(lower_left, upper_right, minTime, maxTime, SRID, conn){
     #     upper_right – Numeric. The (x,y) coordinate tuple of the upper right corner of the bounding box
     #     minTime – POSIX. Beginning of the time range (inclusive), given as e.g. "1990-01-01"
     #     maxTime – POSIX. End of the time range (exclusive)
-    #     SRID – Character. The SRID identifier of the CRS.
+    #     name – Character. Name of the PostGIS table which contains the points.
+    #     geom – Character. Name of the geometry field in the PostGIS table.
     #     conn – PostgreSQLConnection.
     # Output:
     #     SpatialPointsDataFrame
@@ -88,9 +74,17 @@ subsetPoints <- function(lower_left, upper_right, minTime, maxTime, SRID, conn){
     uppR <- paste0("ST_Point(",upper_right[1],",",upper_right[2],")")
     minT <- as.character(format(minTime, "%Y-%m-%d"))
     maxT <- as.character(format(maxTime, "%Y-%m-%d"))
+    
+    # Retrieve the EPSG (not SRID, because the sp.CRS() works only with EPSG codes, and SRID not equal EPSG)
+    str <- paste0("SELECT auth_srid FROM spatial_ref_sys,(SELECT DISTINCT(ST_SRID(",geom,")) FROM ",name," WHERE ",geom," IS NOT NULL) as f WHERE srid = f.st_srid;")
+    epgs <- as.character(dbGetQuery(con, str)[1,1])
+    # Check if the EPSG is unique, otherwise throw an error
+    if (length(epgs) == 0) {
+        stop("Multiple EPSGs in the point geometry")        
+    }
 
-    # coerce the SQL query
-    query <- paste0("SELECT ogc_fid, ST_AsText(wkb_geometry) As geom FROM fires WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(",lowL,",",uppR,"),",SRID,") AND fires.time >= '",minT,"' AND fires.time < '",maxT,"';")
+    # Coerce the SQL query to get the points from PostGIS
+    query <- paste0("SELECT ogc_fid, ST_AsText(", geom,") As geom FROM ", name," WHERE ", geom," && ST_SetSRID(ST_MakeBox2D(", lowL,",", uppR,"),", epgs,") AND fires.time >= '", minT,"' AND fires.time < '", maxT,"';")
     
     # Alternative SQL query:
     #     
@@ -111,17 +105,16 @@ subsetPoints <- function(lower_left, upper_right, minTime, maxTime, SRID, conn){
     # cast the WKT back into a SpatialPointsDataFrame with the correct CRS
     row.names(res) <- res$ogc_fid
     
-    p4s = CRS(paste0("+init=epsg:", SRID))
-    for (i in seq(nrow(res))) {
-        if (i == 1) {
-            spTemp <-  readWKT(res$geom[i], res$ogc_fid[i], p4s)
-        }
-        else {
-            spTemp <-  rbind(
-                spTemp, readWKT(res$geom[i], res$ogc_fid[i], p4s)
-            )
-        }
+    # set projection
+    p4s = CRS(paste0("+init=epsg:", epgs))
+    
+    # Read the WKTs into a data frame with their projection.
+    spTemp <-  readWKT(res$geom[1], res$ogc_fid[1], p4s)
+    for (i in 2:nrow(res)) {
+        spTemp <-  rbind(spTemp, readWKT(res$geom[i], res$ogc_fid[i], p4s))
     }
+    
+    # cast the data frame into a SpatialPointsDataFrame
     subs <-  SpatialPointsDataFrame(spTemp, res[-2])
     
     dbDisconnect(con)
@@ -134,9 +127,8 @@ lower_left <- c(6400000, 1950000)
 upper_right <- c(6500000 ,2050000)
 minTime <- as.POSIXct("1990-01-01")
 maxTime <- as.POSIXct("2000-01-01")
-srid <- "2229"
 
-subset_pt <- subsetPoints(lower_left, upper_right, minTime, maxTime, srid, con)
+subset_pt <- subsetPoints(con, name="fires", geom="wkb_geometry", lower_left, upper_right, minTime, maxTime)
 
 # plot the points
 plot(fires, pch = 3)
