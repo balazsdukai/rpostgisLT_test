@@ -14,7 +14,7 @@ fires$Time <- as.POSIXct(as.Date("1960-01-01")+(fires$Time-1))
 
 coordinates(fires) <- c("X", "Y")
 proj4string(fires) <- CRS("+init=epsg:2229 +ellps=GRS80")
-plot(fires, pch = 3)
+#plot(fires, pch = 3)
 
 # =========================================
 # Query spatial and temporal extent
@@ -124,15 +124,10 @@ subsetPoints <- function(lower_left, upper_right, minTime, maxTime, SRID, conn){
     }
     subs <-  SpatialPointsDataFrame(spTemp, res[-2])
     
-    dbClearResult(res)
     dbDisconnect(con)
     return(subs)
     
 }
-
-
-
-
 
 # subset parameters
 lower_left <- c(6400000, 1950000)
@@ -144,5 +139,6 @@ srid <- "2229"
 subset_pt <- subsetPoints(lower_left, upper_right, minTime, maxTime, srid, con)
 
 # plot the points
+plot(fires, pch = 3)
 points(subset_pt, col = "red")
 
