@@ -131,48 +131,18 @@ subsetPoints <- function(lower_left, upper_right, minTime, maxTime, SRID, conn){
 }
 
 
-query <- "SELECT ogc_fid, ST_AsText(wkb_geometry) As geom
-FROM fires
-WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(ST_Point(6400000, 1950000),ST_Point(6500000 ,2050000)),2229) AND
-fires.time >= '1990-01-01' AND fires.time < '2000-01-01'"
 
-query2 <- "SELECT ST_AsText(ST_Collect(f.geom)) FROM (SELECT ST_AsText(wkb_geometry) As geom FROM fires WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(ST_Point(6400000, 1950000),ST_Point(6500000 ,2050000)),2229) AND fires.time >= '1990-01-01' AND fires.time < '2000-01-01') as f;"
 
-fire_subset <- dbGetQuery(con, query)
 
-# cast the WKT back into a SpatialPointsDataFrame with the correct CRS
-row.names(fire_subset) <- fire_subset$ogc_fid
-p4s = CRS("+init=epsg:2229 +ellps=GRS80")
-for (i in seq(nrow(fire_subset))) {
-    if (i == 1) {
-        spTemp = readWKT(fire_subset$geom[i], fire_subset$ogc_fid[i], p4s)
-    }
-    else {
-        spTemp = rbind(
-            spTemp, readWKT(fire_subset$geom[i], fire_subset$ogc_fid[i], p4s)
-        )
-    }
-}
-fire_subset = SpatialPointsDataFrame(spTemp, fire_subset[-2])
-points(fire_subset, col = "red")
+# subset parameters
+lower_left <- c(6400000, 1950000)
+upper_right <- c(6500000 ,2050000)
+minTime <- as.POSIXct("1990-01-01")
+maxTime <- as.POSIXct("2000-01-01")
+srid <- "2229"
 
-a <- c(6400000, 1950000)
-b <- c(6500000 ,2050000)
+subset_pt <- subsetPoints(lower_left, upper_right, minTime, maxTime, srid, con)
 
-c <- as.POSIXct("1990-01-01")
-d <- as.POSIXct("1999-10-29 02:00:00")
+# plot the points
+points(subset_pt, col = "red")
 
-e <- "2229"
-
-x <- subsetPoints(a,b,c,d,e,con)
-
-lowL <- paste0("ST_Point(",a[1],",",a[2],")")
-uppR <- paste0("ST_Point(",b[1],",",b[2],")")
-minT <- as.character(format(c, "%Y-%m-%d"))
-maxT <- as.character(format(d, "%Y-%m-%d"))
-SRID <- e
-
-query <- paste0("SELECT ogc_fid, ST_AsText(wkb_geometry) As geom FROM fires WHERE wkb_geometry && ST_SetSRID(ST_MakeBox2D(",lowL,",",uppR,"),",SRID,") AND fires.time >= '",minT,"' AND fires.time < '",maxT,"';")
-
-dbClearResult(fire_subset)
-fire_subset <- dbGetQuery(con, query)
