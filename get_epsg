@@ -1,0 +1,1 @@
+﻿SELECT auth_srid FROM spatial_ref_sys,(SELECT DISTINCT(ST_SRID(wkb_geometry)) FROM fires WHERE wkb_geometry IS NOT NULL) as f WHERE srid = f.st_srid;
