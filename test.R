@@ -40,23 +40,29 @@ con <- dbConnect(drv, user="rpostgisLT", password="rpostgisLT", dbname="rpostgis
 dbSendQuery(con, "create extension if not exists postgis")
 
 # load the "fires" data frame into PostgreSQL
-writeOGR(fires, driver = "PostgreSQL", "PG:dbname=rpostgisLT host=localhost", layer = "fires")
-dbListFields(con, "fires")
-query <- "SELECT column_name, data_type FROM information_schema.columns
+tables <- dbListTables(con)
+if ("fires" %in% tables){
+    print("Database table 'fires' already exists, skipping export")
+} else {
+    writeOGR(fires, driver = "PostgreSQL", "PG:dbname=rpostgisLT host=localhost", 
+             layer = "fires", check_exists = TRUE, overwrite_layer = FALSE)
+    dbListFields(con, "fires")
+    query <- "SELECT column_name, data_type FROM information_schema.columns
 WHERE table_name = 'fires'"
-res <- dbSendQuery(con, query)
-dbFetch(res)
-dbClearResult(res)
-
-# the field "time" which contain the timestamps is of type "character varying"
-pgAsDate(con, "fires", date = "time") # convert field type to timestamp
-
-# create indexes
-# ogc_fid —> primary key. The UID field. It was already created by the writeOGR function.
-# time —> B-Tree. Because timestamps are 1D and ordered.
-# wkb_geometry —> GiST. Because data is 2D and irregular. And because PostGIS doesn't support pure R-Trees any more. Thus literally GiST is the only spatial indexing method available in PostGIS at the moment.
-pgIndex(con, "fires", "time", "time_idx", method = "btree")
-pgIndex(con, "fires", "wkb_geometry", "geom_idx", method = "gist")
+    res <- dbSendQuery(con, query)
+    dbFetch(res)
+    dbClearResult(res)
+    
+    # the field "time" which contain the timestamps is of type "character varying"
+    pgAsDate(con, "fires", date = "time") # convert field type to timestamp
+    
+    # create indexes
+    # ogc_fid —> primary key. The UID field. It was already created by the writeOGR function.
+    # time —> B-Tree. Because timestamps are 1D and ordered.
+    # wkb_geometry —> GiST. Because data is 2D and irregular. And because PostGIS doesn't support pure R-Trees any more. Thus literally GiST is the only spatial indexing method available in PostGIS at the moment.
+    pgIndex(con, "fires", "time", "time_idx", method = "btree")
+    pgIndex(con, "fires", "wkb_geometry", "geom_idx", method = "gist")
+}
 
 
 # Shiny gadget to subset points in the database ================================
