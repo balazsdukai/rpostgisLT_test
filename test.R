@@ -26,14 +26,15 @@ library("rpostgis")
 library("rgdal")
 library("rgeos")
 
-# create and set up a test database with PostGIS extension
-# shell: createdb -U USERNAME test
+# create and set up a rpostgisLT database with PostGIS extension
+# shell: createdb -U rpostgisLT -h localhost rpostgisLT
 drv <- dbDriver("PostgreSQL")
-con <- dbConnect(drv, user="USERNAME", password="PASSWORD", dbname="test")
-dbSendQuery(con, "create extension postgis")
+con <- dbConnect(drv, user="rpostgisLT", password="rpostgisLT", dbname="rpostgisLT",
+                 host="localhost")
+dbSendQuery(con, "create extension if not exists postgis")
 
 # load the "fires" data frame into PostgreSQL
-writeOGR(fires, driver = "PostgreSQL", "PG:dbname=test host=localhost", layer = "fires")
+writeOGR(fires, driver = "PostgreSQL", "PG:dbname=rpostgisLT host=localhost", layer = "fires")
 dbListFields(con, "fires")
 query <- "SELECT column_name, data_type FROM information_schema.columns
 WHERE table_name = 'fires'"
@@ -51,22 +52,18 @@ pgAsDate(con, "fires", date = "time") # convert field type to timestamp
 pgIndex(con, "fires", "time", "time_idx", method = "btree")
 pgIndex(con, "fires", "wkb_geometry", "geom_idx", method = "gist")
 
-# function to retrieve the subset of points form the database
-subsetPoints <- function(conn, name, geom, lower_left, upper_right, minTime, maxTime){
+# a Shiny gadget to subset points in the database
+subsetPoints <- function(conn, name, geom){
     # ==============================
-    # Subsets a group of points in a PostGIS database by a bounding box and time range.
-    # Outputs the subset as a SpatialPointsDataFrame object.
+    # Interactively subsets a group of points in a PostGIS database by on-screen selection and time range.
+    # Outputs the the ID of the selected points.
     # Input:
-    #     lower_left – Numeric. The (x,y) coordinate tuple of the lower left corner of the bounding box
-    #     upper_right – Numeric. The (x,y) coordinate tuple of the upper right corner of the bounding box
-    #     minTime – POSIX. Beginning of the time range (inclusive), given as e.g. "1990-01-01"
-    #     maxTime – POSIX. End of the time range (exclusive)
     #     name – Character. Name of the PostGIS table which contains the points.
     #     geom – Character. Name of the geometry field in the PostGIS table.
     #     conn – PostgreSQLConnection.
     # Output:
-    #     SpatialPointsDataFrame
-    # Requires: sp, rpostgresql, rgeos
+    #     List of the selected point IDs
+    # Requires: sp, rpostgresql, rgeos, miniUI, shiny, ggplot2
     # Reference: rpostgis (https://github.com/mablab/rpostgis/blob/master/R/pgGetPts.r)
     # ==============================
     
@@ -122,15 +119,15 @@ subsetPoints <- function(conn, name, geom, lower_left, upper_right, minTime, max
     
 }
 
-# subset parameters
-lower_left <- c(6400000, 1950000)
-upper_right <- c(6500000 ,2050000)
-minTime <- as.POSIXct("1990-01-01")
-maxTime <- as.POSIXct("2000-01-01")
-
-subset_pt <- subsetPoints(con, name="fires", geom="wkb_geometry", lower_left, upper_right, minTime, maxTime)
-
-# plot the points
-plot(fires, pch = 3)
-points(subset_pt, col = "red")
+# # subset parameters
+# lower_left <- c(6400000, 1950000)
+# upper_right <- c(6500000 ,2050000)
+# minTime <- as.POSIXct("1990-01-01")
+# maxTime <- as.POSIXct("2000-01-01")
+# 
+# subset_pt <- subsetPoints(con, name="fires", geom="wkb_geometry", lower_left, upper_right, minTime, maxTime)
+# 
+# # plot the points
+# plot(fires, pch = 3)
+# points(subset_pt, col = "red")
 
