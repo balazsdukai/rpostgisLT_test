@@ -28,6 +28,7 @@ library("rgeos")
 library(shiny)
 library(miniUI)
 
+# Set up database ====
 # create and set up a rpostgisLT database with PostGIS extension
 # shell: createdb -U rpostgisLT -h localhost rpostgisLT
 drv <- dbDriver("PostgreSQL")
@@ -54,80 +55,109 @@ pgAsDate(con, "fires", date = "time") # convert field type to timestamp
 pgIndex(con, "fires", "time", "time_idx", method = "btree")
 pgIndex(con, "fires", "wkb_geometry", "geom_idx", method = "gist")
 
-# =========================================
-# Shiny gadget to subset points in the database 
-# =========================================
 
-subsetPoints <- function(conn, name, geom){
-    # ==============================
+# Shiny gadget to subset points in the database ====
+
+subsetPoints <- function(conn, name, geom, time){
+    # # # # # # # #
     # Interactively subsets a group of points in a PostGIS database by on-screen selection and time range.
     # Outputs the the ID of the selected points.
     # Input:
     #     name – Character. Name of the PostGIS table which contains the points.
     #     geom – Character. Name of the geometry field in the PostGIS table.
     #     conn – PostgreSQLConnection.
+    #     time – Character. Name of the timestamp field in the PostGIS table.
     # Output:
     #     List of the selected point IDs
     # Requires: sp, rpostgresql, rgeos, miniUI, shiny
     # Reference: 
     # rpostgis (https://github.com/mablab/rpostgis/blob/master/R/pgGetPts.r)
     # Shiny gadget (http://shiny.rstudio.com/articles/gadgets.html)
-    # ==============================
+    # # # # # # # #
+    
+    # Get values for the UI from the database
+    queryMinT <- paste0("SELECT min(",time,")::date FROM ", name,";")
+    minT <- dbGetQuery(conn, queryMinT)[1,1] # data.frame -> Date
+    queryMaxT <- paste0("SELECT max(",time,")::date FROM ", name,";")
+    maxT <- dbGetQuery(conn, queryMaxT)[1,1]
+    
     
     ui <- miniPage(
-        gadgetTitleBar("Drag to select points"),
-        miniContentPanel(
-            # The brush="brush" argument means we can listen for
-            # brush events on the plot using input$brush.
-            plotOutput("plot", height = "100%", brush = "brush")
+        gadgetTitleBar("Instruction"),
+        miniTabstripPanel(
+            miniTabPanel("Visualize", icon = icon("area-chart"),
+                        miniContentPanel(
+                            plotOutput("plot", height = "100%")
+                        )
+            ),
+            miniTabPanel("Parameters", icon = icon("sliders"),
+                        miniContentPanel(
+                            dateRangeInput("year", "Select date range", start=minT, end=maxT, 
+                                   min=minT, max=maxT, sep = "")
+                        )
+            ),
+            miniTabPanel("Testing", icon = icon("sliders"),
+                         miniContentPanel(
+                             textOutput("text")
+                         )
+            )
         )
     )
     
     server <- function(input, output, session) {
         
-        # Database communication ===============================================
-        # Retrieve the EPSG (not SRID, because the sp.CRS() works only with
-        # EPSG codes, and SRID not equal EPSG)
-        str <- paste0("SELECT auth_srid FROM spatial_ref_sys,(SELECT DISTINCT(ST_SRID(",geom,")) FROM ",name," WHERE ",geom," IS NOT NULL) as f WHERE srid = f.st_srid;")
-        epgs <- as.character(dbGetQuery(con, str)[1,1])
-        # Check if the EPSG is unique, otherwise throw an error
-        if (length(epgs) == 0) {
-            stop("Multiple EPSGs in the point geometry")        
+        queryDB <- function(conn, name, geom, time){
+            # # # # # # # #
+            # Database communication 
+            #
+            # Retrieve the EPSG (not SRID, because the sp.CRS() works only with
+            # EPSG codes, and SRID not equal EPSG)
+            str <- paste0("SELECT auth_srid FROM spatial_ref_sys,(SELECT DISTINCT(ST_SRID(",geom,")) FROM ",name," WHERE ",geom," IS NOT NULL) as f WHERE srid = f.st_srid;")
+            epgs <- as.character(dbGetQuery(con, str)[1,1])
+            # Check if the EPSG is unique, otherwise throw an error
+            if (length(epgs) == 0) {
+                stop("Multiple EPSGs in the point geometry")        
+            }
+            
+            
+            # The SQL query to subset the points, based on the user input parameters in the UI
+            query <- paste0("SELECT ogc_fid, ST_AsText(", geom,") As geom FROM ", name," WHERE ",name,".",time," >= '",input$year[1],"' AND ",name,".",time," < '",input$year[2],"' ;")
+            
+            
+            # retrieve the data from the database
+            res <- dbGetQuery(conn, query)
+            # cast the WKT back into a SpatialPointsDataFrame with the correct CRS
+            row.names(res) <- res$ogc_fid
+            # set projection
+            p4s <-  CRS(paste0("+init=epsg:", epgs))
+            # Read the WKTs into a data frame with their projection.
+            spTemp <-  readWKT(res$geom[1], res$ogc_fid[1], p4s)
+            for (i in 2:nrow(res)) {
+                spTemp <-  rbind(spTemp, readWKT(res$geom[i], res$ogc_fid[i], p4s))
+            }
+            # cast the data frame into a SpatialPointsDataFrame
+            subs <-  SpatialPointsDataFrame(spTemp, res[-2])
+            
+            return(subs)
         }
         
-        # Coerce the SQL query to get the points from PostGIS
-        query <- paste0("SELECT ogc_fid, ST_AsText(", geom,") As geom FROM ", name,";")
-        
-        # retrieve the data from the database
-        res <- dbGetQuery(conn, query)
-        
-        # cast the WKT back into a SpatialPointsDataFrame with the correct CRS
-        row.names(res) <- res$ogc_fid
-        
-        # set projection
-        p4s = CRS(paste0("+init=epsg:", epgs))
-        
-        # Read the WKTs into a data frame with their projection.
-        spTemp <-  readWKT(res$geom[1], res$ogc_fid[1], p4s)
-        for (i in 2:nrow(res)) {
-            spTemp <-  rbind(spTemp, readWKT(res$geom[i], res$ogc_fid[i], p4s))
-        }
-        
-        # cast the data frame into a SpatialPointsDataFrame
-        subs <-  SpatialPointsDataFrame(spTemp, res[-2])
-        
-        
-        # Gadget ===============================================================
+        # # # # # # # #
+        # Gadget 
         # Render the plot
         output$plot <- renderPlot({
+            subs <- queryDB(conn, name, geom, time)
             # Plot the data 
             plot(subs)
+        })
+        
+        output$text <- renderText({
+            paste("Date range selected:", paste(as.character(input$year), collapse = " to "))
         })
         
         # Handle the Done button being pressed.
         observeEvent(input$done, {
             # Return the brushed points. See ?shiny::brushedPoints.
-            stopApp(brushedPoints(subs, input$brush))
+            stopApp(TRUE)
         })
     }
     
@@ -140,23 +170,8 @@ subsetPoints <- function(conn, name, geom){
     # query <- paste0("SELECT ogc_fid, ST_AsText(", geom,") As geom FROM ", name," WHERE ", geom," && ST_SetSRID(ST_MakeBox2D(", lowL,",", uppR,"),", epgs,") AND fires.time >= '", minT,"' AND fires.time < '", maxT,"';")
 
 
-    
-    # dbDisconnect(con)
-    # return(subs)
     runGadget(ui, server)
     
 }
 
-# # subset parameters
-# lower_left <- c(6400000, 1950000)
-# upper_right <- c(6500000 ,2050000)
-# minTime <- as.POSIXct("1990-01-01")
-# maxTime <- as.POSIXct("2000-01-01")
-# 
-# subset_pt <- subsetPoints(con, name="fires", geom="wkb_geometry", lower_left, upper_right, minTime, maxTime)
-# 
-# # plot the points
-# plot(fires, pch = 3)
-# points(subset_pt, col = "red")
-
-subsetPoints(con, "fires", "wkb_geometry")
+subsetPoints(con, "fires", "wkb_geometry", "time")
