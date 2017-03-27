@@ -8,6 +8,11 @@ output: html_notebook
 ```{r setup, message=FALSE}
 library(rpostgis)
 library(lubridate)
+library(rpostgisLT)
+library(sf)
+library(shiny)
+library(miniUI)
+library(leaflet)
 ```
 
 # Part 1
@@ -27,8 +32,8 @@ gps_data <- rbind(roe_gps_data$GSM01511[c("gps_sensors_code","utc_date",
 Create an `ltraj` from the data.
 
 ```{r ltraj_roe}
-gps_data$tstamp <- dmy_hms(paste(gps_data[1, "utc_date"],
-                                 gps_data[1, "utc_time"], sep = " "),
+gps_data$tstamp <- dmy_hms(paste(gps_data[, "utc_date"],
+                                 gps_data[, "utc_time"], sep = " "),
                            tz = "UTC")
 gps_data <- dplyr::rename(gps_data, x = longitude, y = latitude)
 gps_data <- dplyr::select(gps_data, x, y, tstamp, gps_sensors_code)
@@ -38,5 +43,174 @@ proj4string <- sp::CRS("+init=epsg:4326")
 roe_ltraj <- adehabitatLT::as.ltraj(gps_data, date = gps_data$tstamp,
                                     id = gps_data$gps_sensors_code,
                                     proj4string = proj4string)
+```
+
+```{r trajdyn}
+hab::trajdyn(roe_ltraj)
+```
+
+```{r to_db}
+ltraj2pgtraj(conn, roe_ltraj, schema = "test2017_1")
+```
+
+# Part 2
+
+```{r shiny}
+subsetSteps <- function(conn) {
+    # Get values from the database
+    SQL <- paste0("select step_id, step_geom, relocation_time
+                  from test2017_1.step_geometry_roe_ltraj
+                  where step_geom is not null")
+    x <- suppressWarnings(st_read_db(conn, query = SQL))
+    minT <- min(x$relocation_time)
+    maxT <- max(x$relocation_time)
+    
+    ui <- bootstrapPage(
+        
+      tags$style(type = "text/css", "html, body {width:100%;height:100%}"),
+      
+      leafletOutput("map", width = "100%", height = "100%"),
+      
+      absolutePanel(top = 10, right = 10,
+                    sliderInput("range", "Timestamp", minT, maxT, 
+                                value = c(minT, maxT), step = 60
+                                )
+                    )
+    )
+    
+    server <- function(input, output, session) {
+        
+        filteredData <- reactive({
+          x[x$relocation_time >= input$range[1] & x$relocation_time <= input$range[2], ]
+        })
+        
+        output$map <- renderLeaflet({
+            leaflet(x) %>%
+                addTiles() %>% 
+                fitBounds(lng1 = 10.9872122, lat1 = 45.9882219,
+                          lng2 = 11.0587093, lat2 = 46.0467987)
+        })
+        
+        observe({
+            leafletProxy("map", data = filteredData()) %>%
+                clearShapes() %>%
+                addPolylines(
+                    fillOpacity = 1,
+                    opacity = 1,
+                    color = "#de2d26",
+                    weight = 3
+                )
+        })
+        
+    }
+    
+    shinyApp(ui, server)
+}
+```
+
+```{r}
+subsetSteps(conn)
+```
+
+# Part 3
+
+```{r read_for_db}
+data("roe_gps_data")
+gps_data <- roe_gps_data$GSM01511[c("utc_date","utc_time","latitude","longitude")]
+
+data("roe_raster")
+raster <- roe_raster$srtm_dem
+```
+
+```{r db_setup}
+pgtrajSchema(conn, schema = "test2017")
+RPostgreSQL::dbWriteTable(conn, name = "gps_data", value = gps_data)
+rpostgis::pgWriteRast(conn, name = c("test2017", "roe_raster"), raster = raster)
+```
+
+Parse timestamps and prepare bursts.
+
+```{sql connection=conn}
+ALTER TABLE
+    public.gps_data ADD tstamp TIMESTAMPTZ;
+
+ALTER TABLE
+    public.gps_data ADD burst TEXT;
+
+UPDATE
+    public.gps_data
+SET
+    tstamp = a.t
+FROM
+    (
+        SELECT
+            "row.names" AS id,
+            (
+                split_part(
+                    utc_date,
+                    '/',
+                    3
+                )|| '-' || split_part(
+                    utc_date,
+                    '/',
+                    2
+                )|| '-' || split_part(
+                    utc_date,
+                    '/',
+                    1
+                )|| ' ' || utc_time || ' ' || 'UTC'
+            )::TIMESTAMPTZ AS t
+        FROM
+            public.gps_data
+    ) a
+WHERE
+    public.gps_data."row.names" = a.id;
+
+UPDATE
+    public.gps_data
+SET
+    burst = a.b,
+    rid = a.id::integer
+FROM
+    (
+        SELECT
+            "row.names" AS id,
+            SUBSTRING( tstamp::TEXT, 1, 7 ) AS b
+        FROM
+            public.gps_data
+    ) a
+WHERE
+    public.gps_data."row.names" = a.id;
+```
+
+```{r}
+as_pgtraj(conn, c("public", "gps_data"), schema = "test2017",
+          relocations = c("longitude", "latitude"), timestamps = "tstamp",
+          bursts = "burst", srid = 4326, rids = "rid")
+```
+
+Average elevation values for each step in SQL.
+
+```{sql connection=conn}
+SELECT
+    step_id,
+    AVG( ST_Value( rast,( gd ).geom )) z
+FROM
+    (
+        SELECT
+            step_id,
+            ST_DumpPoints(step_geom) AS gd
+        FROM
+            test2017.step_geometry_pgtraj
+        WHERE
+            step_geom IS NOT NULL
+    ) AS traj
+LEFT JOIN test2017.roe_raster ON
+    ST_Intersects(
+        rast,
+        (gd).geom
+    )
+GROUP BY
+    step_id;
 ```
 
