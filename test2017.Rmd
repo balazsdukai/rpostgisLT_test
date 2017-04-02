@@ -17,7 +17,7 @@ library(leaflet)
 
 # Part 1
 
-Read roe deer trajectories.
+Read roe deer trajectories
 
 ```{r read_roe_gps}
 data("roe_sensors_animals_tables")
@@ -25,11 +25,11 @@ data("roe_gps_data")
 
 gps_data <- rbind(roe_gps_data$GSM01511[c("gps_sensors_code","utc_date",
                                           "utc_time","latitude","longitude")],
-                roe_gps_data$GSM01512[c("gps_sensors_code","utc_date",
+                  roe_gps_data$GSM01512[c("gps_sensors_code","utc_date",
                                         "utc_time","latitude","longitude")])
 ```
 
-Create an `ltraj` from the data.
+Create an `ltraj` from the data. It is important to set the correct time zone and the Coordinate Reference System (CRS) of the relocations. The time zone is *UTC* as it is denoted in the variable names. There is no explicit information on the CRS, but because the relocations are raw GPS measurements, they are most likely in *EPSG:4226* which is the CRS used by GPS.
 
 ```{r ltraj_roe}
 gps_data$tstamp <- dmy_hms(paste(gps_data[, "utc_date"],
@@ -45,9 +45,13 @@ roe_ltraj <- adehabitatLT::as.ltraj(gps_data, date = gps_data$tstamp,
                                     proj4string = proj4string)
 ```
 
-```{r trajdyn}
+Thest the `hab::trajdyn()` function.
+
+```{r trajdyn, message=FALSE}
 hab::trajdyn(roe_ltraj)
 ```
+
+Put the *ltraj* into a database.
 
 ```{r to_db}
 ltraj2pgtraj(conn, roe_ltraj, schema = "test2017_1")
@@ -55,9 +59,11 @@ ltraj2pgtraj(conn, roe_ltraj, schema = "test2017_1")
 
 # Part 2
 
+For the Shiny App the trajectories are directly pulled from the database and the app uses Leaflet to plot the trajectories on a base map. By using a reactive expression it is possible to interactively subset the *steps* based on their time stamp.
+
 ```{r shiny}
 subsetSteps <- function(conn) {
-    # Get values from the database
+    # get trajectories from the database
     SQL <- paste0("select step_id, step_geom, relocation_time
                   from test2017_1.step_geometry_roe_ltraj
                   where step_geom is not null")
@@ -80,10 +86,12 @@ subsetSteps <- function(conn) {
     
     server <- function(input, output, session) {
         
+        # reactivbe expression
         filteredData <- reactive({
           x[x$relocation_time >= input$range[1] & x$relocation_time <= input$range[2], ]
         })
         
+        # Leaflet base map, and starting view centered at the trajectories
         output$map <- renderLeaflet({
             leaflet(x) %>%
                 addTiles() %>% 
@@ -91,6 +99,7 @@ subsetSteps <- function(conn) {
                           lng2 = 11.0587093, lat2 = 46.0467987)
         })
         
+        # update plotted trajectories with the reactive expression output
         observe({
             leafletProxy("map", data = filteredData()) %>%
                 clearShapes() %>%
@@ -114,6 +123,8 @@ subsetSteps(conn)
 
 # Part 3
 
+Read required data.
+
 ```{r read_for_db}
 data("roe_gps_data")
 gps_data <- roe_gps_data$GSM01511[c("utc_date","utc_time","latitude","longitude")]
@@ -122,13 +133,17 @@ data("roe_raster")
 raster <- roe_raster$srtm_dem
 ```
 
+Set up database for storing trajectories.
+
 ```{r db_setup}
 pgtrajSchema(conn, schema = "test2017")
 RPostgreSQL::dbWriteTable(conn, name = "gps_data", value = gps_data)
 rpostgis::pgWriteRast(conn, name = c("test2017", "roe_raster"), raster = raster)
 ```
 
-Parse timestamps and prepare bursts.
+Parse time stamps, including correct time zone (UTC), and prepare bursts from year-month combinations. Update the raw data table with the parsed values.
+
+The RS DBI driver complains that the result set does not correspond to a SELECT statement, which is expected. Nevertheless the process runs through.
 
 ```{sql connection=conn}
 ALTER TABLE
@@ -136,11 +151,15 @@ ALTER TABLE
 
 ALTER TABLE
     public.gps_data ADD burst TEXT;
+    
+ALTER TABLE
+    public.gps_data ADD rid INTEGER;
 
 UPDATE
     public.gps_data
 SET
-    tstamp = a.t
+    tstamp = a.t,
+    rid = a.id::integer
 FROM
     (
         SELECT
@@ -169,8 +188,7 @@ WHERE
 UPDATE
     public.gps_data
 SET
-    burst = a.b,
-    rid = a.id::integer
+    burst = a.b
 FROM
     (
         SELECT
@@ -183,13 +201,15 @@ WHERE
     public.gps_data."row.names" = a.id;
 ```
 
+Create *pgtrajes* from the raw data.
+
 ```{r}
 as_pgtraj(conn, c("public", "gps_data"), schema = "test2017",
           relocations = c("longitude", "latitude"), timestamps = "tstamp",
           bursts = "burst", srid = 4326, rids = "rid")
 ```
 
-Average elevation values for each step in SQL.
+By using spatial intersection on the trajectories and the elevation raster, the average elevation values for each step are extracted.
 
 ```{sql connection=conn}
 SELECT
